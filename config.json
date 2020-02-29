@@ -1,0 +1,17 @@
+{
+    "work_dir": "",
+    "pub_key_path": "",
+    "end_point":"",
+    "access_key_id": "",
+    "access_key_secret":"",
+    "bucket_name": "",
+    "period_day": 24,
+    "start_time_hour": 15,
+    "start_time_minute": 30,
+    "auto_delete": false,
+    "immediate_exec": true,
+    "backup_path" :[
+        "",
+        ""
+    ]
+}
