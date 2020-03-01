@@ -34,7 +34,7 @@ func (t *Task) refreshTime() () {
 	Log.Info("Current time: ", ts)
 
 	date := ts.Format("2006-01-02")
-	t.logFileName = "Backuper-" + date + "-" + t.hostname + "-" + unixTs + ".log"
+	t.logFileName = "Backuper-" + date + "-" + t.hostname + "-" + unixTs + ".log.gpg"
 	t.finalFileName = "Backuper-" + date + "-" + t.hostname + "-" + unixTs + ".tar.gz.gpg"
 	t.logFilePath = t.config.WorkDir + t.logFileName
 	t.finalFilePath = t.config.WorkDir + t.finalFileName
@@ -46,7 +46,7 @@ func (t *Task) refreshTime() () {
 
 func (t *Task) start() (err error) {
 	var logger Logger
-	err = logger.Initialize(t.logFilePath)
+	err = logger.Initialize(t.logFilePath, t.config.PubKeyPath)
 	if err != nil { return }
 	Log.Info("Backuper logger initialized")
 
