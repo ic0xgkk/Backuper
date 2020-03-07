@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"io/ioutil"
 	"os"
 )
@@ -19,18 +20,28 @@ type ConfigFile struct {
 	StartTimeMinute uint8    `json:"start_time_minute"`
 	AutoDelete      bool     `json:"auto_delete"`
 	ImmediateExec   bool     `json:"immediate_exec"`
+	LogLevel        string   `json:"log_level"`
 }
 
-func InitializeConfig(configFilePath string) (fileConfig ConfigFile, err error) {
-	var jsonFile *os.File
-	if jsonFile, err = os.Open(configFilePath); err != nil { return }
+var Config *ConfigFile
+
+func InitializeConfig(configFilePath string) (err error) {
+	jsonFile, err := os.Open(configFilePath)
+	if err != nil {
+		return errors.New("Open global log file failed: " + err.Error())
+	}
+	defer jsonFile.Close()
 
 	var jsonByte []byte
-	if jsonByte, err = ioutil.ReadAll(jsonFile); err != nil { return }
+	jsonByte, err = ioutil.ReadAll(jsonFile)
+	if err != nil {
+		return errors.New("Read json config failed: " + err.Error())
+	}
 
-	if err = json.Unmarshal(jsonByte, &fileConfig); err != nil { return }
+	err = json.Unmarshal(jsonByte, &Config)
+	if err != nil {
+		return errors.New("Unmarshal json failed: " + err.Error())
+	}
 
-	_ = jsonFile.Close()
-
-	return fileConfig, nil
+	return nil
 }

@@ -1,80 +1,64 @@
 package main
 
 import (
+	"./file"
+	"./logger"
 	"flag"
 	"fmt"
 	"github.com/jasonlvhit/gocron"
-	"github.com/sirupsen/logrus"
 	"os"
 )
 
-var Log = logrus.New()
+type Environment struct {
+	Hostname string
+}
+
+var Env Environment
+var Log logger.Logger
 
 func main() {
 	var configFilePath string
 	flag.StringVar(&configFilePath, "config", "./config.json", "Config file path")
 	flag.Parse()
 
-	config, err := InitializeConfig(configFilePath)
+	err := InitializeConfig(configFilePath)
 	if err != nil {
-		panic(err)
+		panic(err.Error())
+	}
+	if Config.StartTimeHour > 24 || Config.StartTimeMinute > 60 {
+		panic("StartTimeHour or StartTimeMinute error")
+	}
+	if Config.PeriodDay == 0 {
+		panic("PeriodDay can not be zero")
 	}
 
-	var hostname string
-	hostname, err = os.Hostname()
+	Env.Hostname, err = os.Hostname()
 	if err != nil {
-		panic(err)
+		panic("Get hostname failed: " + err.Error())
 	}
 
-	config.WorkDir += "/"
-	globalLogFilePath := config.WorkDir + "Backuper-GlobalLog-" + hostname + ".log"
-	var globalLogFile *os.File
-	globalLogFile, err = os.OpenFile(globalLogFilePath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0777)
+	var logFile file.File
+	err = logFile.Initialize(Config.WorkDir + "/Backuper-GlobalLog-" + Env.Hostname + ".log", "wa")
 	if err != nil {
-		panic(err)
+		panic("Initialize global log failed: " + err.Error())
 	}
-
-	Log.Out = globalLogFile
-	Log.SetLevel(logrus.InfoLevel)
-	Log.SetFormatter(&logrus.TextFormatter{
-		ForceColors:               false,
-		DisableColors:             false,
-		EnvironmentOverrideColors: false,
-		DisableTimestamp:          false,
-		FullTimestamp:             false,
-		TimestampFormat:           "",
-		DisableSorting:            false,
-		SortingFunc:               nil,
-		DisableLevelTruncation:    false,
-		PadLevelText:              false,
-		QuoteEmptyFields:          false,
-		FieldMap:                  nil,
-		CallerPrettyfier:          nil,
-	})
-
-	Log.Warn("Backuper starting...")
-	Log.Info("Log is all set now and in Info level")
-	Log.Info("Hostname: ", hostname)
+	defer logFile.Close()
+	Log.Initialize(Config.LogLevel, logFile.GetWriter())
+	Log.Info("Hostname: ", Env.Hostname)
 
 	taskCron := gocron.NewScheduler()
 
 	var task Task
-	task.InitializeTask(config, hostname, taskCron)
-	Log.Info("Task initialized")
-
-	if config.StartTimeHour > 24 || config.StartTimeMinute > 60 {
-		panic("What do you want to do? ")
-	}
-	taskCron.Every(uint64(config.PeriodDay)).Days().At(fmt.Sprint(config.StartTimeHour, ":", config.StartTimeMinute)).
+	task.Initialize(taskCron)
+	taskCron.Every(uint64(Config.PeriodDay)).Days().At(fmt.Sprint(Config.StartTimeHour, ":", Config.StartTimeMinute)).
 		DoSafely(task.Start)
 	Log.Info("Cron initialized")
 
-	if config.ImmediateExec == true {
-		Log.Info("Immediate execute enabled, processing")
+	if Config.ImmediateExec == true {
+		Log.Info("Immediate execute enabled, processing now")
 		taskCron.RunAll()
 	}
 
 	<- taskCron.Start()
-
-	_ = globalLogFile.Close()
 }
+

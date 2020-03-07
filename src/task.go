@@ -1,30 +1,33 @@
 package main
 
 import (
-	"crypto/sha256"
+	"./compress"
+	"./encrypt"
+	"./file"
 	"fmt"
 	"github.com/jasonlvhit/gocron"
-	"io"
 	"os"
 	"runtime"
 	"time"
 )
 
 type Task struct {
-	config             ConfigFile
 	logFilePath        string
 	finalFilePath      string
 	checkPointFilePath string
+
 	logFileName        string
 	finalFileName      string
-	globalLogFileName  string
-	hostname           string
 	scheduler          *gocron.Scheduler
+
+	partFile           file.File
+	partFileEncrypt    encrypt.Encrypt
+
+	metaFile           file.File
+	metaFileEncrypt    encrypt.Encrypt
 }
 
-func (t *Task) InitializeTask(c ConfigFile, hostname string, scheduler *gocron.Scheduler) () {
-	t.config = c
-	t.hostname = hostname
+func (t *Task) Initialize(scheduler *gocron.Scheduler) () {
 	t.scheduler = scheduler
 }
 
@@ -34,78 +37,134 @@ func (t *Task) refreshTime() () {
 	Log.Info("Current time: ", ts)
 
 	date := ts.Format("2006-01-02")
-	t.logFileName = "Backuper-" + date + "-" + t.hostname + "-" + unixTs + ".log.gpg"
-	t.finalFileName = "Backuper-" + date + "-" + t.hostname + "-" + unixTs + ".tar.gz.gpg"
-	t.logFilePath = t.config.WorkDir + t.logFileName
-	t.finalFilePath = t.config.WorkDir + t.finalFileName
-	t.checkPointFilePath = t.config.WorkDir + "checkpoint.cp"
+	t.logFileName = "Backuper-" + date + "-" + Env.Hostname + "-" + unixTs + ".log.gpg"
+	t.finalFileName = "Backuper-" + date + "-" + Env.Hostname + "-" + unixTs + ".tar.gz.gpg"
+	t.logFilePath = Config.WorkDir + "/" + t.logFileName
+	t.finalFilePath = Config.WorkDir + "/" + t.finalFileName
+	t.checkPointFilePath = Config.WorkDir + "/checkpoint.cp"
 
 	Log.Info("Current task log file: ", t.logFileName)
 	Log.Info("Current task backup file: ", t.finalFileName)
 }
 
-func (t *Task) start() (err error) {
-	var logger Logger
-	err = logger.Initialize(t.logFilePath, t.config.PubKeyPath)
-	if err != nil { return }
-	Log.Info("Backuper logger initialized")
-
-	gnu := GnuPG{}
-	err = gnu.InitializeGnuPG(t.config.PubKeyPath, t.finalFilePath)
-	if err != nil { return }
-	Log.Info("Backuper GnuPG initialized")
-
-	compress := Compress{}
-	err = compress.InitializeCompress(&logger, &gnu)
-	if err != nil { return }
-	Log.Info("Backuper compresser initialized")
-
-	for i := 0; i < len(t.config.BackupPath); i++ {
-		Log.Info("Processing ", t.config.BackupPath[i])
-		err = compress.Compress(t.config.BackupPath[i])
-		if err != nil { return }
+func (t *Task) TurnOnMultiLogger() (err error) {
+	err = t.partFile.Initialize(t.logFilePath, "rw")
+	if err != nil {
+		Log.Error("Open part log file failed: ", err.Error())
+		return 
 	}
-	Log.Info("Compress succeed")
 
-	compress.Close()
-	gnu.Close()
-
-	logger.Info(fmt.Sprint("Backup created with ", logger.errCounter, " error"))
-	var file *os.File
-	file, err = os.Open(t.finalFilePath)
-	if err != nil { return }
-	h := sha256.New()
-	if _, err = io.Copy(h,file); err != nil {
+	err = t.partFileEncrypt.Initialize(t.partFile.GetWriter(), Config.PubKeyPath)
+	if err != nil {
+		Log.Error("Failed to initialize part encrypted log: ", err.Error())
 		return
 	}
-	_ = file.Close()
-	logger.Info("Backup file sha256: ", fmt.Sprintf("%x", h.Sum(nil)))
-	Log.Info("Logger succeed")
 
-	logger.Close()
+	Log.SwitchToMultiWriter(t.partFileEncrypt.GetWriter())
 
-	oss := OSS{}
-	err = oss.InitializeOss(t.config.EndPoint,
-		t.config.AccessKeyID,
-		t.config.AccessKeySecret,
-		t.config.BucketName,
-		t.checkPointFilePath)
-	if err != nil { return }
-	Log.Info("Oss initialized")
+	return nil
+}
 
-	Log.Info("Uploading ", t.logFileName)
-	err = oss.Upload(t.logFilePath, t.logFileName)
-	if err != nil { return }
-	Log.Info("Succeed")
+func (t *Task) TurnOffMultiLogger() {
+	Log.SwitchToSingleWriter()
+	t.partFileEncrypt.Close()
+	t.partFile.Close()
+}
 
-	Log.Info("Uploading ", t.finalFileName)
-	err = oss.Upload(t.finalFilePath, t.finalFileName)
-	if err != nil { return }
-	Log.Info("Succeed")
+func (t *Task) PrepareMetadata() (err error) {
+	err = t.metaFile.Initialize(t.finalFilePath, "rw")
+	if err != nil {
+		Log.Error("Initialize metadata file failed: ", err.Error())
+		return
+	}
 
-	oss.Closer()
+	err = t.metaFileEncrypt.Initialize(t.metaFile.GetWriter(), Config.PubKeyPath)
+	if err != nil {
+		Log.Error("Initialize metadata file encrypt failed: ", err.Error())
+		return
+	}
 
-	if t.config.AutoDelete == true {
+	return nil
+}
+
+func (t *Task) ClearMetadata() {
+	t.metaFileEncrypt.Close()
+	t.metaFile.Close()
+}
+
+func (t *Task) Start() () {
+	Log.Warn("Task starting...")
+
+	_, jt := t.scheduler.NextRun()
+	Log.Debug("Job current/next running time: ", jt)
+
+	t.refreshTime()
+	Log.Info("Time refreshed")
+
+	err := t.PrepareMetadata()
+	if err != nil {
+		Log.Error("Prepare metadata failed")
+		return
+	}
+	Log.Info("Prepare metadata succeed")
+	defer t.ClearMetadata()
+
+	err = t.TurnOnMultiLogger()
+	if err != nil {
+		Log.Error("Turn on multi logger failed")
+		return
+	}
+	Log.Info("Turn on multi logger")
+	defer t.TurnOffMultiLogger()
+
+	var comp compress.Compress
+	err = comp.Initialize(t.metaFileEncrypt.GetWriter(), FileInfoHook)
+	if err != nil {
+		Log.Error("Initialize compress failed: ", err.Error())
+		return
+	}
+	Log.Info("Initialize compress succeed")
+	defer comp.Close()
+
+	for i := 0; i < len(Config.BackupPath); i++ {
+		Log.Info("Processing ", Config.BackupPath[i])
+		err = comp.Compress(Config.BackupPath[i])
+		if err != nil {
+			Log.Error("Compress failed: ", err.Error())
+			return
+		}
+	}
+	comp.Close()  // Write compress footer manually.
+	Log.Info("Compress handle closed")
+
+	Log.Info("Compress succeed")
+
+	t.ClearMetadata()  // Write encrypt footer and file footer manually.
+	Log.Info("Metadata handle closed")
+
+	var sha256code string
+	sha256code, err = GenSha256(t.finalFilePath)
+	if err != nil {
+		Log.Error("Generate final metadata sha256 failed: ", err.Error())
+		return
+	}
+	Log.Info("Metadata sha256 code: ", sha256code)
+
+	t.TurnOffMultiLogger()  // Switch to single logger mode and turn off file descriptor manually.
+	Log.Info("Turn off multi logger")
+
+	var names, paths []string
+	err = UploadToBucket(t.checkPointFilePath,
+		append(names, t.finalFileName, t.logFileName),
+		append(paths, t.finalFilePath, t.logFilePath))
+	if err != nil {
+		Log.Error("Upload failed")
+	} else {
+		Log.Info("Upload succeed")
+	}
+
+	if Config.AutoDelete == true {
+		Log.Info("Auto delete enabled")
 		err = os.Remove(t.logFilePath)
 		if err != nil {
 			Log.Warn("Auto delete failed, ", err.Error())
@@ -116,22 +175,7 @@ func (t *Task) start() (err error) {
 		}
 	}
 
-	return nil
-}
-
-func (t *Task) Start() () {
-	Log.Warn("Task starting...")
-	_, jt := t.scheduler.NextRun()
-	Log.Info("Job current/next running time: ", jt)
-
-	t.refreshTime()
-	Log.Info("Time refreshed")
-
-	err:= t.start()
-	if err != nil {
-		Log.Error("Backup failed, ", err.Error())
-	}
-	Log.Info("Backup succeed")
+	Log.Warn("Task finished")
 
 	runtime.GC()
 }
